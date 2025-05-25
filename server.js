@@ -3,7 +3,7 @@ const express = require("express");
 const axios = require("axios");
 const Stripe = require("stripe");
 const cors = require("cors");
-const bodyParser = require("body-parser");
+
 const app = express();
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -12,79 +12,72 @@ app.use(express.json());
 
 const OTHER_BACKEND_BASE = "https://tms-server-rosy.vercel.app/";
 
-// Create PaymentIntent
+// Step 1: Create PaymentIntent
 app.post("/create-payment-intent", async (req, res) => {
   const { civilNIC, fineId } = req.body;
 
   if (!civilNIC || !fineId) {
-    return res.status(400).json({ error: "Missing userId or fineId" });
+    return res.status(400).json({ error: "Missing civilNIC or fineId" });
   }
 
   try {
-    // Get fine data
+    // Fetch the fine
     const fineRes = await axios.get(`${OTHER_BACKEND_BASE}/policeIssueFine/${fineId}`);
     const fine = fineRes.data.data;
 
-    // Verify user owns the fine
+    // Verify ownership
     if (fine.civilNIC !== civilNIC) {
       return res.status(403).json({ error: "User not authorized to pay this fine" });
     }
 
-    // Get amount from fineManagementId
+    // Get fine amount
     const fineMgmtRes = await axios.get(`${OTHER_BACKEND_BASE}/fineManagement/${fine.fineManagementId}`);
-    const fineDetails = fineMgmtRes.data.data;
-    const amount = parseFloat(fineDetails.fine) * 100; // convert to cents
+    const amount = parseFloat(fineMgmtRes.data.data.fine) * 100; // USD cents
 
+    // Create Stripe PaymentIntent
     const paymentIntent = await stripe.paymentIntents.create({
       amount,
       currency: "usd",
       metadata: {
-        userId,
         fineId,
+        civilNIC,
       },
     });
 
-    res.send({ clientSecret: paymentIntent.client_secret });
+    res.status(200).send({ clientSecret: paymentIntent.client_secret });
   } catch (err) {
-    console.error("Error creating payment intent:", err);
-    res.status(500).json({ error: "Payment intent creation failed" });
+    console.error("PaymentIntent creation error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Webhook endpoint
-app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
+// Step 2: Confirm Payment (called from frontend after payment succeeds)
+app.post("/confirm-payment", async (req, res) => {
+  const { fineId, civilNIC } = req.body;
 
-  let event;
+  if (!fineId || !civilNIC) {
+    return res.status(400).json({ error: "Missing fineId or civilNIC" });
+  }
 
   try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error("Webhook signature verification failed.", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+    // Fetch the fine to validate again
+    const fineRes = await axios.get(`${OTHER_BACKEND_BASE}/policeIssueFine/${fineId}`);
+    const fine = fineRes.data.data;
 
-  // Handle successful payment
-  if (event.type === "payment_intent.succeeded") {
-    const paymentIntent = event.data.object;
-    const { fineId, userId } = paymentIntent.metadata;
-
-    try {
-      // Update fine status
-      await axios.put(`${OTHER_BACKEND_BASE}/policeIssueFine/${fineId}`, {
-        isPaid: true,
-      });
-      console.log(`Fine ${fineId} marked as paid.`);
-    } catch (err) {
-      console.error("Failed to update fine status:", err);
+    if (fine.civilNIC !== civilNIC) {
+      return res.status(403).json({ error: "Unauthorized payment confirmation" });
     }
-  }
 
-  res.json({ received: true });
+    // Mark fine as paid
+    await axios.put(`${OTHER_BACKEND_BASE}/policeIssueFine/${fineId}`, {
+      isPaid: true,
+    });
+
+    res.status(200).json({ message: "Fine marked as paid" });
+  } catch (err) {
+    console.error("Failed to confirm payment:", err.message);
+    res.status(500).json({ error: "Failed to confirm payment" });
+  }
 });
 
 app.listen(3001, () => console.log("Server running on port 3001"));
