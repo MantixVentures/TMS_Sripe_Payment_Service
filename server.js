@@ -14,9 +14,9 @@ const OTHER_BACKEND_BASE = "https://tms-server-rosy.vercel.app/";
 
 // Create PaymentIntent
 app.post("/create-payment-intent", async (req, res) => {
-  const { civilNIC, fineManagementId } = req.body;
+  const { civilNIC, fineId } = req.body;
 
-  if (!civilNIC || !fineManagementId) {
+  if (!civilNIC || !fineId) {
     return res.status(400).json({ error: "Missing userId or fineId" });
   }
 
